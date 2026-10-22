@@ -11,21 +11,25 @@ const root = path.join(__dirname, "..");
 const source = fs.readFileSync(path.join(root, "background.js"), "utf8");
 
 function createWorker() {
+  let now = Date.now();
+  class ClockDate extends Date { static now() { return now; } }
   let messageHandler;
   let alarmHandler;
   let savedJobs = {};
   let createdTabs = 0;
+  const alarms = new Map();
+  const notifications = [];
   const tabs = new Map([
     [
       10,
-      { id: 10, url: "https://chatgpt.com/c/first-chat", title: "First chat" },
+      { id: 10, url: "https://chatgpt.com/c/first-chat", title: "Первый чат" },
     ],
     [
       20,
       {
         id: 20,
         url: "https://chatgpt.com/c/second-chat",
-        title: "Second chat",
+        title: "Второй чат",
       },
     ],
   ]);
@@ -45,20 +49,20 @@ function createWorker() {
     storage: {
       local: {
         async get() {
-          return { jobs: savedJobs };
+          return { jobs: structuredClone(savedJobs) };
         },
         async set(data) {
-          savedJobs = data.jobs;
+          savedJobs = structuredClone(data.jobs);
         },
       },
       onChanged: { addListener() {} },
     },
     alarms: {
-      async get() {
-        return null;
+      async get(name) {
+        return alarms.get(name);
       },
-      async create() {},
-      async clear() {},
+      async create(name, options) { alarms.set(name, { ...options, scheduledTime: options.when }); },
+      async clear(name) { alarms.delete(name); },
       onAlarm: {
         addListener(fn) {
           alarmHandler = fn;
@@ -67,15 +71,16 @@ function createWorker() {
     },
     tabs: {
       async get(id) {
-        if (!tabs.has(id)) throw new Error("No tab");
+        if (!tabs.has(id)) throw new Error("Нет вкладки");
         return tabs.get(id);
       },
-      async sendMessage() {
+      async sendMessage(tabId, message) {
+        notifications.push({ tabId, ...message });
         return { ok: true };
       },
       async create() {
         createdTabs++;
-        throw new Error("Tab creation is forbidden");
+        throw new Error("Создавать вкладки нельзя");
       },
     },
     scripting: {
@@ -90,7 +95,7 @@ function createWorker() {
     URL,
     crypto: webcrypto,
     console,
-    Date,
+    Date: ClockDate,
     Promise,
   });
 
@@ -119,8 +124,11 @@ function createWorker() {
     jobs,
     add,
     tabs,
-    async alarm() {
-      alarmHandler({ name: "watchdog-lite" });
+    alarms,
+    notifications,
+    advance(ms) { now += ms; },
+    async alarm(name = "watchdog-lite") {
+      alarmHandler({ name });
       await new Promise((resolve) => setImmediate(resolve));
     },
     get createdTabs() {
@@ -129,7 +137,7 @@ function createWorker() {
   };
 }
 
-test("popup can create a job for an actual ChatGPT conversation", async () => {
+test("запуск из окна расширения создаёт задание для открытого чата", async () => {
   const worker = createWorker();
   const added = await worker.add(10);
   assert.ok(added.job?.id);
@@ -141,7 +149,7 @@ test("popup can create a job for an actual ChatGPT conversation", async () => {
   );
 });
 
-test("content scripts cannot read jobs belonging to other tabs", async () => {
+test("вкладка не видит задания других вкладок", async () => {
   const worker = createWorker();
   const first = (await worker.add(10)).job;
   const second = (await worker.add(20)).job;
@@ -150,23 +158,23 @@ test("content scripts cannot read jobs belonging to other tabs", async () => {
   assert.equal(response.jobs[second.id], undefined);
 });
 
-test("site content cannot request new jobs or delete existing jobs", async () => {
+test("скрипт страницы не может запускать и удалять задания", async () => {
   const worker = createWorker();
   const first = (await worker.add(10)).job;
   const attempt = await worker.message(
     { type: "REMOVE", id: first.id },
     worker.content(10),
   );
-  assert.match(attempt.error, /popup/);
+  assert.match(attempt.error, /окна расширения/);
   const other = await worker.message(
     { type: "ADD", tabId: 20, url: worker.tabs.get(20).url },
     worker.content(10),
   );
-  assert.match(other.error, /popup/);
+  assert.match(other.error, /окна расширения/);
   assert.equal(worker.jobs().length, 1);
 });
 
-test("rejects forged origin and disallows mutation of immutable identifiers", async () => {
+test("подмена сайта и изменение постоянных полей отклоняются", async () => {
   const worker = createWorker();
   const first = (await worker.add(10)).job;
   const request = {
@@ -178,7 +186,7 @@ test("rejects forged origin and disallows mutation of immutable identifiers", as
     patch: { url: "https://attacker.example/" },
   };
   const rejected = await worker.message(request, worker.content(10));
-  assert.match(rejected.error, /unsafe/);
+  assert.match(rejected.error, /Недопустимое/);
   assert.equal(worker.jobs()[0].url, first.url);
 
   const outsider = await worker.message(
@@ -189,10 +197,10 @@ test("rejects forged origin and disallows mutation of immutable identifiers", as
       url: "https://attacker.example/",
     },
   );
-  assert.match(outsider.error, /ChatGPT tab/);
+  assert.match(outsider.error, /вкладке ChatGPT/);
 });
 
-test("checks URL, phase and runId before accepting a patch", async () => {
+test("перед обновлением проверяются адрес, этап и запуск", async () => {
   const worker = createWorker();
   const job = (await worker.add(10)).job;
   const message = {
@@ -201,17 +209,17 @@ test("checks URL, phase and runId before accepting a patch", async () => {
     runId: job.runId,
     expectedUrl: job.url,
     expectedPhase: "WAIT",
-    patch: { detail: "stale write" },
+    patch: { detail: "устаревшая запись" },
   };
   assert.equal((await worker.message(message, worker.content(10))).ok, false);
-  assert.equal(worker.jobs()[0].detail, "Запуск: проверка страницы");
+  assert.equal(worker.jobs()[0].detail, "Проверяю страницу");
 
   message.expectedPhase = "BOOT";
   message.runId = "unknown";
   assert.equal((await worker.message(message, worker.content(10))).ok, false);
 });
 
-test("enforces limits and type validation for patches", async () => {
+test("поля состояния проверяются по типам и ограничениям", async () => {
   const worker = createWorker();
   const job = (await worker.add(10)).job;
   const patch = (value) =>
@@ -227,14 +235,14 @@ test("enforces limits and type validation for patches", async () => {
       worker.content(10),
     );
 
-  assert.match((await patch({ turn: 101 })).error, /unsafe/);
-  assert.match((await patch({ detail: "x".repeat(501) })).error, /unsafe/);
-  assert.match((await patch({ tabId: 20 })).error, /unsafe/);
+  assert.match((await patch({ turn: 101 })).error, /Недопустимое/);
+  assert.match((await patch({ detail: "x".repeat(501) })).error, /Недопустимое/);
+  assert.match((await patch({ tabId: 20 })).error, /Недопустимое/);
   assert.equal((await patch({ turn: 100 })).ok, true);
   assert.equal(worker.jobs()[0].turn, 100);
 });
 
-test("does not reopen closed or navigated tabs", async () => {
+test("закрытая или переключённая вкладка не открывается заново", async () => {
   const worker = createWorker();
   await worker.add(10);
   worker.tabs.get(10).url = "https://chatgpt.com/c/different-chat";
@@ -243,20 +251,20 @@ test("does not reopen closed or navigated tabs", async () => {
   assert.equal(worker.createdTabs, 0);
 });
 
-test("STOP_ALL requires popup and clears only extension jobs", async () => {
+test("общая остановка доступна только из окна расширения", async () => {
   const worker = createWorker();
   await worker.add(10);
   const rejected = await worker.message(
     { type: "STOP_ALL" },
     worker.content(10),
   );
-  assert.match(rejected.error, /popup/);
+  assert.match(rejected.error, /окна расширения/);
   assert.equal(worker.jobs().length, 1);
   assert.equal((await worker.message({ type: "STOP_ALL" })).ok, true);
   assert.equal(worker.jobs().length, 0);
 });
 
-test("manifest restricts host to ChatGPT and uses minimal APIs", () => {
+test("разрешения ограничены сайтом ChatGPT и нужными API", () => {
   const manifest = JSON.parse(
     fs.readFileSync(path.join(root, "manifest.json"), "utf8"),
   );
@@ -269,9 +277,170 @@ test("manifest restricts host to ChatGPT and uses minimal APIs", () => {
   ]);
 });
 
-test("content script caps continuations and does not reload tabs", () => {
+test("число продолжений ограничено, перезагрузки нет", () => {
   const content = fs.readFileSync(path.join(root, "content.js"), "utf8");
   assert.match(content, /maxTurns: 100/);
   assert.match(content, /j\.turn >= LIMIT\.maxTurns/);
   assert.doesNotMatch(content, /location\.reload\s*\(/);
+});
+
+test("повторный запуск заменяет завершённую запись и сбрасывает счётчики", async () => {
+  const worker = createWorker();
+  const first = (await worker.add(10)).job;
+  const oldRun = first.runId;
+  await worker.message({
+    type: "PATCH", id: first.id, runId: oldRun,
+    expectedUrl: first.url, expectedPhase: "BOOT",
+    patch: { mode: "PAUSED", phase: "DONE", result: "PASS", turn: 42 },
+  }, worker.content(10));
+
+  const next = (await worker.add(10)).job;
+  assert.equal(worker.jobs().length, 1);
+  assert.notEqual(next.id, first.id);
+  assert.notEqual(next.runId, oldRun);
+  assert.equal(next.mode, "RUNNING");
+  assert.equal(next.turn, 0);
+  assert.equal(next.result, "");
+  assert.equal((await worker.message({
+    type: "PATCH", id: first.id, runId: oldRun,
+    expectedUrl: first.url, expectedPhase: "DONE", patch: { detail: "старый запуск" },
+  }, worker.content(10))).ok, false);
+});
+
+test("повторный запуск после ошибки не затрагивает соседний чат", async () => {
+  const worker = createWorker();
+  const first = (await worker.add(10)).job;
+  const second = (await worker.add(20)).job;
+  await worker.message({
+    type: "PATCH", id: first.id, runId: first.runId,
+    expectedUrl: first.url, expectedPhase: "BOOT",
+    patch: { mode: "ERROR", error: "Нет ответа", turn: 4 },
+  }, worker.content(10));
+  const next = (await worker.add(10)).job;
+  assert.equal(worker.jobs().length, 2);
+  assert.equal(worker.jobs().find(job => job.id === second.id).runId, second.runId);
+  assert.equal(next.error, "");
+  assert.equal(next.turn, 0);
+});
+
+test("двойное нажатие запуска не создаёт второе задание", async () => {
+  const worker = createWorker();
+  const responses = await Promise.all([worker.add(10), worker.add(10)]);
+  assert.equal(responses.filter(response => response.job).length, 1);
+  assert.match(responses.find(response => response.error).error, /уже запущен/);
+  assert.equal(worker.jobs().length, 1);
+});
+
+test("старая карточка не запускает другой чат в той же вкладке", async () => {
+  const worker = createWorker();
+  const first = (await worker.add(10)).job;
+  worker.tabs.get(10).url = "https://chatgpt.com/c/different-chat";
+  await worker.alarm();
+  const response = await worker.message({ type: "ADD", tabId: 10, url: first.url });
+  assert.match(response.error, /Откройте нужный чат/);
+  assert.equal(worker.jobs()[0].mode, "ERROR");
+  assert.equal(worker.jobs()[0].runId, first.runId);
+});
+
+test("главная страница и посторонний сайт не запускаются", async () => {
+  const worker = createWorker();
+  for (const url of ["https://chatgpt.com/", "https://example.com/c/chat"]) {
+    worker.tabs.get(10).url = url;
+    assert.ok((await worker.add(10)).error);
+  }
+  assert.equal(worker.jobs().length, 0);
+});
+
+test("после 20 работающих чатов новые задания не создаются", async () => {
+  const worker = createWorker();
+  for (let id = 100; id < 121; id++) {
+    worker.tabs.set(id, { id, url: "https://chatgpt.com/c/chat-" + id });
+    const result = await worker.add(id);
+    if (id < 120) assert.ok(result.job);
+    else assert.match(result.error, /20 чатов/);
+  }
+  assert.equal(worker.jobs().length, 20);
+});
+
+const update = (worker, job, patch) => worker.message({
+  type: "PATCH", id: job.id, runId: job.runId,
+  expectedUrl: job.url, expectedPhase: job.phase, patch,
+}, worker.content(job.tabId));
+
+test("срок запуска равен 15 минутам и не меняется из вкладки", async () => {
+  const worker = createWorker();
+  const job = (await worker.add(10)).job;
+  assert.equal(job.deadline - job.startedAt, 15 * 60_000);
+  assert.match((await update(worker, job, { deadline: job.deadline + 60_000 })).error, /Недопустимое/);
+  assert.match((await update(worker, job, { startedAt: job.startedAt + 60_000 })).error, /Недопустимое/);
+  assert.match((await update(worker, job, { result: "TIMEOUT" })).error, /Недопустимое/);
+  await worker.alarm();
+  assert.equal(worker.alarms.get("watchdog-deadline").scheduledTime, job.deadline);
+});
+
+test("PAUSE остаётся под наблюдением и WORKING не сбрасывает срок", async () => {
+  const worker = createWorker();
+  const job = (await worker.add(10)).job;
+  const paused = (await update(worker, job, {
+    mode: "PAUSED", phase: "PAUSE", result: "PAUSE", pauseUserCount: 0,
+  })).job;
+  assert.ok((await worker.message({ type: "GET" }, worker.content(10))).jobs[job.id]);
+  assert.match((await worker.add(10)).error, /уже запущен/);
+  worker.advance(5 * 60_000);
+  const resumed = (await update(worker, paused, {
+    mode: "RUNNING", phase: "SENDING", result: "", cmd: "cmd-resumed-12345678",
+  })).job;
+  assert.equal(resumed.deadline, job.deadline);
+  assert.equal(resumed.startedAt, job.startedAt);
+  assert.equal(resumed.endedAt, 0);
+});
+
+test("ровно на 15 минутах последняя проверка отправки отказывает", async () => {
+  const worker = createWorker();
+  const job = (await worker.add(10)).job;
+  const cmd = "cmd-timeout-12345678";
+  await update(worker, job, { phase: "SENDING", cmd });
+  worker.advance(15 * 60_000 - 1);
+  const check = { type: "CHECK", id: job.id, runId: job.runId, cmd };
+  assert.equal((await worker.message(check, worker.content(10))).ok, true);
+  worker.advance(1);
+  const expired = await worker.message(check, worker.content(10));
+  assert.equal(expired.ok, false);
+  assert.equal(expired.expired, true);
+  assert.equal(worker.jobs()[0].result, "TIMEOUT");
+  assert.ok(worker.notifications.some(message => message.type === "TIMEOUT" && message.runId === job.runId));
+});
+
+test("пауза тоже заканчивается по общему сроку, старый запуск не оживает", async () => {
+  const worker = createWorker();
+  const job = (await worker.add(10)).job;
+  const paused = (await update(worker, job, {
+    mode: "PAUSED", phase: "PAUSE", result: "PAUSE",
+  })).job;
+  worker.advance(15 * 60_000);
+  await worker.alarm("watchdog-deadline");
+  assert.equal(worker.jobs()[0].result, "TIMEOUT");
+  assert.equal(worker.jobs()[0].mode, "ERROR");
+  assert.equal((await update(worker, paused, {
+    mode: "RUNNING", phase: "WAIT", result: "",
+  })).ok, false);
+  assert.equal(worker.alarms.has("watchdog-deadline"), false);
+});
+
+test("после сна компьютера отправка блокируется до следующего фонового опроса", async () => {
+  const worker = createWorker();
+  const job = (await worker.add(10)).job;
+  worker.advance(30 * 60_000);
+  const response = await update(worker, job, { phase: "SENDING", cmd: "cmd-late-12345678" });
+  assert.equal(response.expired, true);
+  assert.equal(worker.jobs()[0].result, "TIMEOUT");
+});
+
+test("старый запуск без срока после обновления требует ручного перезапуска", async () => {
+  const worker = createWorker();
+  await worker.add(10);
+  delete worker.jobs()[0].deadline;
+  await worker.alarm();
+  assert.equal(worker.jobs()[0].mode, "ERROR");
+  assert.match(worker.jobs()[0].error, /После обновления/);
 });

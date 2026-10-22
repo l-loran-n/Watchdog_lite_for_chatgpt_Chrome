@@ -13,33 +13,29 @@
         <span class="brand-mark" aria-hidden="true">W</span>
         <div>
           <h1>Watchdog <span>Lite</span></h1>
-          <p class="version">Версия 6.3.7 · Chrome</p>
+          <p class="version" id="version"></p>
         </div>
       </div>
-      <span class="local-pill" title="Работает без отдельного сервера"
-        >Локально</span
-      >
     </header>
 
     <section class="intro" aria-label="Описание">
       <p>
-        Сопровождение выбранных диалогов ChatGPT до результата PASS или FAIL.
+        Продолжает задачу в ChatGPT. Один запуск — до 15 минут.
       </p>
       <p class="caution">
-        Расширение отправляет сообщения от вашего имени. Не запускайте без
-        контроля задачи с оплатой, удалением данных и другими необратимыми
-        действиями.
+        Сообщения отправляются от вашего имени. Задачи с оплатой, удалением
+        данных и отправкой писем лучше не оставлять без присмотра.
       </p>
     </section>
 
     <main>
       <button id="add" class="primary" type="button">
-        + Добавить текущий диалог
+        Запустить в этом чате
       </button>
       <p id="message" role="alert" aria-live="polite"></p>
 
       <div class="section-head">
-        <h2 id="heading">Диалоги (0)</h2>
+        <h2 id="heading">Чаты (0)</h2>
         <button id="stop-all" class="subtle" type="button" disabled>
           Остановить все
         </button>
@@ -48,8 +44,17 @@
     </main>
 
     <footer>
-      Для продолжения работы Chrome должен оставаться запущенным. Закрытие
-      вкладки останавливает отслеживание.
+      <details>
+        <summary>Как пользоваться</summary>
+        <ol>
+          <li>Откройте чат ChatGPT, в котором уже есть задача.</li>
+          <li>Нажмите «Запустить в этом чате».</li>
+          <li>Оставьте Chrome и вкладку открытыми. Окно расширения можно закрыть.</li>
+        </ol>
+        <p>Для другого чата повторите эти шаги в его вкладке.</p>
+        <p>На PAUSE ответьте ChatGPT в самом чате. Watchdog продолжит по новому WORKING, завершит по PASS или FAIL. Пауза входит в 15 минут.</p>
+      </details>
+      <p>Черновик в поле ввода ставит отправку на паузу.</p>
     </footer>
   </body>
 </html>

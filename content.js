@@ -1,13 +1,12 @@
 (() => {
-  if (globalThis.__watchdog637) return;
-  globalThis.__watchdog637 = true;
+  if (globalThis.__watchdogLite) return;
+  globalThis.__watchdogLite = true;
 
   const LIMIT = {
     stable: 7000,
     send: 60000,
     history: 60000,
     page: 120000,
-    answer: 120 * 60000,
     repair: 2,
     rescue: 2,
     rescueWait: 90000,
@@ -80,10 +79,15 @@
     }
     return clean(text);
   }
-  const generating = () =>
-    !!$(
-      '[data-is-streaming="true"], button[data-testid="stop-button"], button[data-testid="stop-generating-button"], button[aria-label*="Stop generating"], button[aria-label*="Stop streaming"], button[aria-label="Stop"], button[aria-label*="Остановить"]',
-    );
+  const stopButton = () => [...document.querySelectorAll(
+    'button[data-testid="stop-button"], button[data-testid="stop-generating-button"], button[aria-label*="Stop generating"], button[aria-label*="Stop streaming"], button[aria-label="Stop"], button[aria-label*="Остановить"]',
+  )].find(visible);
+  const generating = () => !!stopButton() ||
+    [...document.querySelectorAll('[data-is-streaming="true"]')].some(visible);
+  function stopGeneration() {
+    const button = stopButton();
+    if (button && !button.disabled) button.click();
+  }
   const sendButton = (editor) => {
     const selector =
       'button[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label="Send message"], button[aria-label="Отправить"]';
@@ -168,7 +172,7 @@
       ) {
         const t = read(ancestor);
         if (t.length < 1200 && pattern.test(t))
-          return "ChatGPT не доставил ответ. Нажмите «Повторить» на странице. Watchdog не отправляет новых команд до восстановления.";
+          return "ChatGPT не доставил ответ";
       }
     }
     const alert = [
@@ -178,7 +182,7 @@
       .map(read)
       .find((t) => t.length < 600 && pattern.test(t));
     return alert
-      ? "ChatGPT сообщил техническую ошибку. Исправьте её в диалоге; Watchdog ожидает."
+      ? "В ChatGPT произошла техническая ошибка"
       : "";
   }
 
@@ -197,7 +201,7 @@
   function status(answer, cmd) {
     const lines = [
       ...answer.matchAll(
-        /(?:^|\n)\s*WD6_STATUS\s+COMMAND_ID=([\w-]+)\s+STATE=(WORKING|PASS|FAIL)\s*(?=\n|$)/g,
+        /(?:^|\n)\s*WD6_STATUS\s+COMMAND_ID=([\w-]+)\s+STATE=(WORKING|PAUSE|PASS|FAIL)\s*(?=\n|$)/g,
       ),
     ];
     if (
@@ -206,10 +210,10 @@
       answer.trim().endsWith(lines[0][0].trim())
     )
       return lines[0][2];
-    // Для уже запущенных диалогов поддерживается и старый протокол.
+    // Поддержка ответов от предыдущих версий расширения.
     const old = [
       ...answer.matchAll(
-        /<WD_STATUS>\s*VERSION=1\s*COMMAND_ID=([\w-]+)\s*STATE=(WORKING|PASS|FAIL)\s*<\/WD_STATUS>/g,
+        /<WD_STATUS>\s*VERSION=1\s*COMMAND_ID=([\w-]+)\s*STATE=(WORKING|PAUSE|PASS|FAIL)\s*<\/WD_STATUS>/g,
       ),
     ];
     return old.length === 1 &&
@@ -228,54 +232,74 @@
     );
     if (i >= 0) {
       const after = t.slice(i + 1);
-      if (after.some((x) => x.role === "user"))
-        return { sent: true, conflict: true };
+      const userTurns = after.filter(x => x.role === "user").length;
+      const lastUser = after.findLastIndex(x => x.role === "user");
       const answer =
-        after.filter((x) => x.role === "assistant").at(-1)?.text || "";
-      // Если часть ответа скрыта или разбита на DOM-элементы, ниже проверим
-      // также последний машинный статус по уникальному ID на самой странице.
-      if (answer && status(answer, cmd)) return { sent: true, answer };
+        after.slice(lastUser + 1).filter(x => x.role === "assistant").at(-1)?.text || "";
+      return { sent: true, answer, userTurns };
     }
-    // Запасной вариант для Projects/GPT с неизвестной структурой DOM.
-    // Принять можно только свежий уникальный COMMAND_ID, не слово PASS само по себе.
+    // Если разметка чата изменилась, можно подтвердить отправку, но не результат.
+    // Статус в общем тексте страницы может оказаться цитатой из сообщения пользователя.
     const page = read($("main") || $('[role="main"]') || document.body);
     const marker = `COMMAND_ID=${cmd}`;
     const sent = page.includes("[WATCHDOG LITE]") && page.includes(marker);
-    const lines = [
-      ...page.matchAll(
-        /(?:^|\n)\s*WD6_STATUS\s+COMMAND_ID=([\w-]+)\s+STATE=(WORKING|PASS|FAIL)\s*(?=\n|$)/g,
-      ),
-    ];
-    const own = lines.filter((x) => x[1] === cmd);
-    if (own.length === 1) return { sent: true, answer: own[0][0].trim() };
-    if (i >= 0) {
-      const after = t.slice(i + 1);
-      return {
-        sent: true,
-        answer: after.filter((x) => x.role === "assistant").at(-1)?.text || "",
-      };
-    }
-    return { sent, answer: "" };
+    return { sent, answer: "", unreadable: sent };
   }
-  function instruction(kind, cmd) {
+  function instruction(kind, cmd, j) {
     const purpose = {
-      BOOT: "Продолжай исходное задание в этом диалоге. Если оно уже выполнено, сообщи PASS; если завершить его невозможно, сообщи FAIL; иначе WORKING. Не повторяй выполненных действий.",
+      BOOT: "Продолжай исходное задание в этом диалоге. Сначала проверь, что уже сделано. Не повторяй выполненные действия.",
       CONTINUE:
         "Продолжай исходное незавершённое задание без повторения выполненных действий.",
       REPAIR:
         "Не выполняй новую работу. Укажи только состояние результата предыдущего ответа.",
       RESCUE:
-        "Предыдущий ответ ChatGPT завершился технической ошибкой. Продолжай исходную задачу с места остановки, не повторяя уже выполненные действия. Если задача полностью завершена — PASS, если выполнить её невозможно — FAIL, иначе — WORKING.",
+        "Предыдущий ответ завершился технической ошибкой. Проверь фактическое состояние и продолжай с места остановки без повторения выполненных действий.",
     }[kind];
-    return `${kind === "RESCUE" ? "продолжай, ты завис\n\n" : ""}[WATCHDOG LITE]\nMESSAGE_KIND=${kind}\nCOMMAND_ID=${cmd}\n\n${purpose}\n\nПоследней строкой ответа напиши строго: WD6_STATUS COMMAND_ID=${cmd} STATE=<одно значение>. Вместо <одно значение> используй только WORKING, PASS или FAIL (одно слово). Не используй HTML-теги или блок кода.`;
+    const seconds = Math.max(0, Math.floor((j.deadline - Date.now()) / 1000));
+    return `[WATCHDOG LITE]
+MESSAGE_KIND=${kind}
+COMMAND_ID=${cmd}
+RUN_DEADLINE=${new Date(j.deadline).toISOString()}
+SECONDS_LEFT=${seconds}
+
+${purpose}
+
+На весь запуск отведено не более 15 минут, включая ожидание пользователя. Осталось ${seconds} сек. Учитывай крайний срок RUN_DEADLINE (UTC). Не запускай работу, которую не успеешь закончить; оставь последнюю минуту на проверку и итог. Лимит не начинается заново после сообщения или паузы.
+
+Состояния:
+WORKING — можешь продолжать незавершённую работу без ответа пользователя.
+PAUSE — нужен ответ, выбор или разрешение пользователя. Коротко задай конкретный вопрос и жди; не продолжай работу сам.
+PASS — задача выполнена и результат проверен настолько, насколько доступно.
+FAIL — завершить задачу невозможно или времени недостаточно. Укажи причину и что осталось.
+
+В конце каждого ответа дай краткий отчёт, без общих обещаний:
+Сделано: 1–3 конкретных факта; укажи количество изменённых или созданных объектов, если оно известно.
+Проверки: сколько выполнено, сколько успешно, сколько с ошибкой; если не запускались — так и напиши.
+Осталось: следующий шаг или блокер; если всё завершено — «ничего».
+Не придумывай числа, время, проценты готовности и результаты проверок. План не считай сделанной работой.
+
+После обычного сообщения пользователя сохраняй этот COMMAND_ID и снова указывай состояние в своём новом ответе. Watchdog снимет PAUSE только по новому ответу после сообщения пользователя: WORKING продолжает запуск, PASS или FAIL завершает его, PAUSE оставляет ожидание.
+Последней строкой ответа напиши строго: WD6_STATUS COMMAND_ID=${cmd} STATE=<одно значение>. Используй только WORKING, PAUSE, PASS или FAIL. Эта строка — обычный текст, без HTML-тегов и блока кода.`;
   }
 
   let tabId,
     busy = false,
     lastSample = "",
     stableSince = 0;
-  chrome.runtime.onMessage.addListener((m, _sender, reply) => {
+  chrome.runtime.onMessage.addListener((m, sender, reply) => {
     if (m?.type === "PING") reply({ ok: true });
+    if (m?.type === "TIMEOUT" && sender.id === chrome.runtime.id) {
+      all().then(jobs => {
+        const current = jobs[m.id];
+        // Не останавливаем другой чат или уже начатый вручную новый запуск.
+        if (current?.runId === m.runId && current.result === "TIMEOUT" &&
+            current.url === url() && Date.now() >= current.deadline) {
+          stopGeneration();
+        }
+        reply({ ok: true });
+      }).catch(() => reply({ ok: false }));
+      return true;
+    }
   });
   rpc({ type: "IDENTIFY" })
     .then((r) => {
@@ -285,7 +309,8 @@
   const all = async () => (await rpc({ type: "GET" })).jobs || {};
   const job = async () =>
     Object.values(await all()).find(
-      (j) => j.mode === "RUNNING" && j.tabId === tabId,
+      (j) => (j.mode === "RUNNING" || (j.mode === "PAUSED" && j.result === "PAUSE")) &&
+        j.tabId === tabId,
     );
   async function patch(j, fields) {
     const r = await rpc({
@@ -302,11 +327,38 @@
     patch(j, { mode: "ERROR", error: reason, detail: "", attention: "" });
   const detail = (j, text) =>
     j.detail === text ? Promise.resolve(j) : patch(j, { detail: text });
-  // Never reload automatically: reloading can discard a user's unsent draft.
+  const expire = (j) => rpc({ type: "EXPIRE", id: j.id, runId: j.runId });
+  const pause = (j, userCount, text) => patch(j, {
+    mode: "PAUSED", phase: "PAUSE", result: "PAUSE",
+    pauseUserCount: userCount, detail: text, error: "", attention: "",
+  });
+  const finish = (j, state) => patch(j, {
+    mode: "DONE", phase: "DONE", result: state,
+    detail: state === "PASS" ? "ChatGPT сообщил, что задача выполнена" :
+      "ChatGPT сообщил, что не может закончить задачу",
+    error: "", attention: "",
+  });
+  async function observePause(j, reply) {
+    if (generating()) {
+      stable("PAUSE_GENERATING", j.cmd);
+      return detail(j, "ChatGPT отвечает на ваше сообщение");
+    }
+    if (!(reply.userTurns > (j.pauseUserCount || 0))) {
+      return detail(j, "Жду вашего ответа в чате");
+    }
+    if (!reply.answer) return detail(j, "Жду новый ответ ChatGPT");
+    if (!stable(j.cmd + ":resume:" + reply.userTurns, reply.answer)) return;
+    const state = status(reply.answer, j.cmd);
+    if (state === "WORKING") return send(j, "CONTINUE");
+    if (state === "PASS" || state === "FAIL") return finish(j, state);
+    if (state === "PAUSE") return pause(j, reply.userTurns, "ChatGPT ждёт вашего ответа");
+    return detail(j, "В новом ответе нет статуса. Попросите ChatGPT указать WORKING, PAUSE, PASS или FAIL с прежним COMMAND_ID.");
+  }
+  // Перезагрузка может стереть черновик, поэтому оставляем её пользователю.
   async function recover(j, reason) {
     return error(
       j,
-      `Требуется вмешательство пользователя: ${reason}. Перезагрузка только вручную.`,
+      `${reason}. Проверьте вкладку и при необходимости перезагрузите её вручную.`,
     );
   }
   function stable(key, value) {
@@ -338,11 +390,12 @@
     }
   }
   async function send(j, kind) {
-    // Bound automated messages; the user must explicitly start a new run.
+    if (!Number.isSafeInteger(j.deadline) || Date.now() >= j.deadline) return expire(j);
+    // После лимита нужен явный повторный запуск из окна расширения.
     if (j.turn >= LIMIT.maxTurns)
       return error(
         j,
-        "Предел 100 автоматических сообщений. Перезапуск только вручную.",
+        "Отправлено 100 сообщений. Проверьте результат и при необходимости запустите снова.",
       );
     // RESCUE — новый технический запрос, а не повтор исходного задания.
     if (generating() || (chatError() && !j.ignoreError && kind !== "RESCUE"))
@@ -354,7 +407,7 @@
     if (draftText(editor))
       return detail(
         j,
-        "Ожидаю: в поле ввода есть пользовательский текст. Черновик не трогаю.",
+        "Жду, пока вы отправите или уберёте черновик",
       );
     const anchor = j.tabOnly ? fingerprint() : "";
     if (j.tabOnly && (!anchor || (j.anchor && j.anchor !== anchor)))
@@ -362,6 +415,9 @@
     const cmd = "cmd-" + crypto.randomUUID();
     const count = (j.rescues || 0) + (kind === "RESCUE" ? 1 : 0);
     const updated = await patch(j, {
+      mode: "RUNNING",
+      result: "",
+      pauseUserCount: 0,
       phase: "SENDING",
       kind,
       cmd,
@@ -369,8 +425,8 @@
       since: Date.now(),
       detail:
         kind === "RESCUE"
-          ? `Восстановление ${count}/${LIMIT.rescue}: отправляю «продолжай, ты завис»`
-          : "Подготовка отправки",
+          ? `Пробую продолжить после ошибки: попытка ${count} из ${LIMIT.rescue}`
+          : "Готовлю сообщение",
       turn: j.turn + 1,
       repairs: kind === "REPAIR" ? j.repairs + 1 : 0,
       recoveries: 0,
@@ -382,6 +438,9 @@
     // Повторная проверка после записи намерения: пользователь мог начать печатать.
     if (draftText(editor)) {
       return patch(updated, {
+        mode: j.mode,
+        result: j.result,
+        pauseUserCount: j.pauseUserCount || 0,
         phase: j.phase,
         cmd: j.cmd,
         kind: j.kind,
@@ -390,10 +449,10 @@
         repairs: j.repairs,
         ignoreError: j.ignoreError,
         detail:
-          "Ожидаю освобождения поля ввода; пользовательский текст не трогаю.",
+          "Жду, пока вы отправите или уберёте черновик",
       });
     }
-    const payload = instruction(kind, cmd);
+    const payload = instruction(kind, cmd, j);
     fill(editor, payload);
     if (!sameText(draftText(editor), payload))
       return error(
@@ -420,19 +479,21 @@
       (chatError() && !updated.ignoreError) ||
       url() !== updated.url ||
       !sameText(draftText(editor), payload)
-    )
+    ) {
+      if (sameText(draftText(editor), payload)) fill(editor, "");
       return error(
         updated,
         "Обстановка перед отправкой изменилась; команда не отправлена",
       );
+    }
     button.click(); // После неоднозначного клика тот же COMMAND_ID не отправляется второй раз.
     await patch(updated, {
       phase: "WAIT",
       since: Date.now(),
       detail:
         kind === "RESCUE"
-          ? `Спасательное сообщение ${count}/${LIMIT.rescue} отправлено; жду ответ`
-          : "Команда отправлена; ожидаю ответ ChatGPT",
+          ? `Попросил продолжить после ошибки: попытка ${count} из ${LIMIT.rescue}`
+          : "Сообщение отправлено. Жду ответ ChatGPT",
     });
   }
 
@@ -458,9 +519,11 @@
         return;
       }
       if (j.tabOnly && j.anchor && fingerprint() !== j.anchor)
-        return error(j, "Вкладка GPT показывает другую переписку");
+        return await error(j, "Вкладка GPT показывает другую переписку");
       const now = Date.now();
+      if (!Number.isSafeInteger(j.deadline) || now >= j.deadline) return await expire(j);
       if (now - j.seen > 20_000) j = (await patch(j, { seen: now })) || j;
+      if (j.phase === "PAUSE") return await observePause(j, replyFor(j.cmd));
       const issue = chatError();
       // Ошибка предыдущего хода может продолжать висеть после успешного RESCUE.
       // Игнорируем её до исчезновения плашки, но ждём подтверждения каждого нового ответа.
@@ -473,21 +536,18 @@
 
       if (j.phase === "BOOT") {
         if (!composer()) {
-          await detail(j, "Ожидаю поле ввода ChatGPT");
+          await detail(j, "Жду загрузки поля ввода");
           return (
             age > LIMIT.page && (await recover(j, "Страница не загрузилась"))
           );
         }
         if (generating()) {
           stable("GENERATING", "");
-          await detail(j, "ChatGPT генерирует ответ; ожидание завершения");
-          return (
-            age > LIMIT.answer &&
-            (await error(j, "Генерация не завершилась за 120 минут"))
-          );
+          await detail(j, "ChatGPT отвечает");
+          return;
         }
         if (j.tabOnly && !fingerprint()) {
-          await detail(j, "Проверяю историю GPT без ссылки /c/");
+          await detail(j, "Проверяю историю чата GPT");
           return (
             age > LIMIT.history &&
             (await error(j, "Невозможно подтвердить диалог без /c/"))
@@ -496,68 +556,62 @@
         if (unresolved) {
           await detail(
             j,
-            "ChatGPT завис при доставке сообщения; подготавливаю восстановление",
+            "В ChatGPT произошла ошибка. Пробую продолжить",
           );
-          if (stable("ERROR", issue)) return send(j, "RESCUE");
+          if (stable("ERROR", issue)) return await send(j, "RESCUE");
           return;
         }
-        await detail(j, "Диалог найден; проверяю, что генерация остановилась");
+        await detail(j, "Чат открыт. Готовлю запуск");
         const tail = read(
           $("main") || $('[role="main"]') || document.body,
         ).slice(-350);
         if (!stable("READY", url() + "\n" + tail)) return;
-        return send(j, "BOOT");
+        return await send(j, "BOOT");
       }
       if (j.phase === "SENDING") {
         if (replyFor(j.cmd).sent)
-          return patch(j, { phase: "WAIT", since: now });
+          return await patch(j, { phase: "WAIT", since: now });
         // Если клик был сделан, но отправка неизвестна, не повторяем его без подтверждения.
         return (
           age > LIMIT.send &&
-          (await error(j, "Отправка не подтверждена; автоповтор запрещён"))
+          (await error(j, "Не удалось подтвердить отправку. Проверьте последнее сообщение в чате перед новым запуском."))
         );
       }
-      if (j.phase !== "WAIT") return error(j, "Неизвестное состояние");
+      if (j.phase !== "WAIT") return await error(j, "Неизвестное состояние");
       const reply = replyFor(j.cmd);
-      if (reply.conflict)
-        return error(
-          j,
-          "После команды Watchdog пользователь написал сообщение",
-        );
+      if (reply.userTurns > 0) {
+        return await pause(j, reply.userTurns - 1, "Вы написали в чат. Жду ответ ChatGPT");
+      }
       if (generating()) {
-        await detail(j, "ChatGPT генерирует ответ; ожидание завершения");
-        return (
-          age > LIMIT.answer &&
-          (await error(j, "Генерация не завершилась за 120 минут"))
-        );
+        await detail(j, "ChatGPT отвечает");
+        stable("GENERATING", j.cmd);
+        return;
+      }
+
+      if (reply.unreadable && age > LIMIT.page) {
+        return await error(j, "Не удалось распознать сообщения на странице. Перезагрузите вкладку и попробуйте снова.");
       }
 
       // Правильный статус важнее старой красной плашки ошибки.
       if (reply.answer && stable(j.cmd, reply.answer)) {
         const s = status(reply.answer, j.cmd);
         if (s === "PASS" || s === "FAIL")
-          return patch(j, {
-            mode: "PAUSED",
-            phase: "DONE",
-            detail: `Результат: ${s}`,
-            result: s,
-            error: "",
-            attention: "",
-          });
-        if (s === "WORKING") return send(j, "CONTINUE");
-        if (j.repairs < LIMIT.repair) return send(j, "REPAIR");
-        return error(
+          return await finish(j, s);
+        if (s === "PAUSE") return await pause(j, reply.userTurns, "ChatGPT ждёт вашего ответа");
+        if (s === "WORKING") return await send(j, "CONTINUE");
+        if (j.repairs < LIMIT.repair) return await send(j, "REPAIR");
+        return await error(
           j,
-          "После двух STATUS_REPAIR корректный статус не получен",
+          "ChatGPT дважды не указал результат. Проверьте ответ в чате.",
         );
       }
 
       if (unresolved) {
         await detail(
           j,
-          "Ошибка доставки ChatGPT: пробую отправить «продолжай, ты завис»",
+          "В ChatGPT произошла ошибка. Пробую продолжить",
         );
-        if (stable("ERROR", issue)) return send(j, "RESCUE");
+        if (stable("ERROR", issue)) return await send(j, "RESCUE");
         return;
       }
       // Если спасательное сообщение тоже не получило ответа, разрешена одна
@@ -569,25 +623,21 @@
         reply.sent &&
         !reply.answer
       ) {
-        if ((j.rescues || 0) < LIMIT.rescue) return send(j, "RESCUE");
-        return error(j, "ChatGPT не ответил после двух спасательных сообщений");
+        if ((j.rescues || 0) < LIMIT.rescue) return await send(j, "RESCUE");
+        return await error(j, "ChatGPT не ответил после двух попыток продолжения. Проверьте вкладку.");
       }
       if (!reply.sent) {
-        await detail(j, "Команда отправлена; ожидаю появления ответа");
+        await detail(j, "Жду, пока сообщение появится в чате");
         return (
           age > LIMIT.page &&
-          (await error(j, "Отправка не подтверждена; повтор запрещён"))
+          (await error(j, "Не удалось подтвердить отправку. Проверьте последнее сообщение в чате перед новым запуском."))
         );
       }
       await detail(
         j,
         j.kind === "RESCUE"
-          ? "Спасательное сообщение доставлено; ожидаю ответ"
-          : "Ожидаю ответ или строку WD6_STATUS",
-      );
-      return (
-        age > LIMIT.answer &&
-        (await error(j, "Не удалось прочитать ответ; повтор запрещён"))
+          ? "Попросил продолжить после ошибки. Жду ответ"
+          : "Жду ответ ChatGPT",
       );
     } catch (e) {
       const j = await job().catch(() => null);
