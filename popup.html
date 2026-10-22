@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Watchdog Lite</title>
+    <link rel="stylesheet" href="popup.css" />
+    <script src="popup.js" defer></script>
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">W</span>
+        <div>
+          <h1>Watchdog <span>Lite</span></h1>
+          <p class="version">Версия 6.3.7 · Chrome</p>
+        </div>
+      </div>
+      <span class="local-pill" title="Работает без отдельного сервера"
+        >Локально</span
+      >
+    </header>
+
+    <section class="intro" aria-label="Описание">
+      <p>
+        Сопровождение выбранных диалогов ChatGPT до результата PASS или FAIL.
+      </p>
+      <p class="caution">
+        Расширение отправляет сообщения от вашего имени. Не запускайте без
+        контроля задачи с оплатой, удалением данных и другими необратимыми
+        действиями.
+      </p>
+    </section>
+
+    <main>
+      <button id="add" class="primary" type="button">
+        + Добавить текущий диалог
+      </button>
+      <p id="message" role="alert" aria-live="polite"></p>
+
+      <div class="section-head">
+        <h2 id="heading">Диалоги (0)</h2>
+        <button id="stop-all" class="subtle" type="button" disabled>
+          Остановить все
+        </button>
+      </div>
+      <div id="list" class="job-list" aria-live="polite"></div>
+    </main>
+
+    <footer>
+      Для продолжения работы Chrome должен оставаться запущенным. Закрытие
+      вкладки останавливает отслеживание.
+    </footer>
+  </body>
+</html>

@@ -1,0 +1,243 @@
+:root {
+  color-scheme: light dark;
+  --bg: #f7f9fc;
+  --surface: #fff;
+  --text: #1c2837;
+  --muted: #69788a;
+  --border: #dce3ed;
+  --accent: #1269d3;
+  --accent-hover: #0759ba;
+  --caution-bg: #fff7e6;
+  --caution-text: #875810;
+  --error: #b52834;
+  --ok: #087d58;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #101720;
+    --surface: #1b2532;
+    --text: #ebf1f8;
+    --muted: #a5b2c0;
+    --border: #354457;
+    --accent: #448de9;
+    --accent-hover: #327ad7;
+    --caution-bg: #332713;
+    --caution-text: #ffce7b;
+    --error: #ff7e8c;
+    --ok: #63d8ab;
+  }
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  width: 390px;
+  max-width: 100%;
+  padding: 20px;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font:
+    13px/1.5 system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
+}
+button {
+  font: inherit;
+  cursor: pointer;
+}
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.app-header,
+.brand,
+.section-head,
+.job {
+  display: flex;
+  align-items: center;
+}
+.app-header,
+.section-head {
+  justify-content: space-between;
+  gap: 12px;
+}
+.brand {
+  gap: 12px;
+}
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 13px;
+  background: var(--accent);
+  color: white;
+  font-size: 24px;
+  font-weight: 750;
+}
+h1,
+h2,
+p {
+  margin: 0;
+}
+h1 {
+  font-size: 20px;
+  line-height: 1.2;
+  letter-spacing: -0.5px;
+}
+h1 span {
+  font-weight: 450;
+}
+h2 {
+  font-size: 14px;
+}
+.version,
+footer {
+  color: var(--muted);
+  font-size: 11px;
+}
+.version {
+  margin-top: 3px;
+}
+.local-pill {
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.intro {
+  margin: 18px 0 16px;
+}
+.intro > p:first-child {
+  color: var(--muted);
+}
+.caution {
+  background: var(--caution-bg);
+  color: var(--caution-text);
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 9px;
+  font-size: 12px;
+}
+.primary {
+  border: none;
+  border-radius: 10px;
+  width: 100%;
+  padding: 11px 14px;
+  background: var(--accent);
+  color: white;
+  font-weight: 650;
+}
+.primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+#message {
+  color: var(--error);
+  margin-top: 8px;
+  white-space: pre-wrap;
+  font-size: 12px;
+}
+#message:empty {
+  display: none;
+}
+.section-head {
+  margin: 21px 0 11px;
+}
+.subtle {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+}
+.subtle:not(:disabled):hover {
+  color: var(--error);
+}
+.job-list {
+  display: grid;
+  gap: 9px;
+  max-height: 380px;
+  overflow-y: auto;
+}
+.job {
+  align-items: flex-start;
+  gap: 9px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--surface);
+  padding: 11px;
+}
+.job-info {
+  min-width: 0;
+  flex: 1;
+}
+.job-name {
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+.job-status {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.status-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  margin-right: 6px;
+}
+.status-dot.done {
+  background: var(--ok);
+}
+.status-dot.error {
+  background: var(--error);
+}
+.job-detail,
+.job-url {
+  font-size: 11px;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+}
+.job-error {
+  color: var(--error);
+  margin-top: 5px;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.remove {
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 19px;
+  width: 29px;
+  height: 29px;
+  line-height: 1;
+}
+.remove:hover {
+  color: var(--error);
+  border-color: var(--error);
+}
+.empty {
+  border: 1px dashed var(--border);
+  border-radius: 11px;
+  color: var(--muted);
+  padding: 22px 15px;
+  text-align: center;
+  background: var(--surface);
+}
+footer {
+  border-top: 1px solid var(--border);
+  margin-top: 17px;
+  padding-top: 12px;
+}

@@ -1,0 +1,26 @@
+name: Validate Chrome extension
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check JavaScript syntax
+        run: |
+          node --version
+          node --check background.js
+          node --check content.js
+          node --check popup.js
+      - name: Run tests
+        run: node --test tests/*.test.cjs

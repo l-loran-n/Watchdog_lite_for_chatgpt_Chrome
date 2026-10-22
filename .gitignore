@@ -1,0 +1,36 @@
+# Developer files and build output
+node_modules/
+dist/
+build/
+coverage/
+*.log
+*.zip
+*.crx
+*.pem
+*.key
+*.p12
+*.pfx
+*.p8
+*.jks
+.env
+.env.*
+!.env.example
+*credentials*
+*secret*.json
+*token*.json
+*.sqlite
+*.sqlite3
+*.db
+*.bak
+*.orig
+*.swp
+.DS_Store
+Thumbs.db
+
+# Browser profiles and user-specific state
+User Data/
+Chrome Profile/
+Default/
+Profile */
+Local Extension Settings/
+IndexedDB/

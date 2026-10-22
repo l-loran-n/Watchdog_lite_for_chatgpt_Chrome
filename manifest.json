@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Watchdog Lite — ChatGPT",
+  "version": "6.3.7",
+  "description": "Локальное сопровождение выбранных диалогов ChatGPT с ограничениями безопасности.",
+  "minimum_chrome_version": "120",
+  "permissions": ["storage", "alarms", "scripting"],
+  "host_permissions": ["https://chatgpt.com/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Watchdog Lite — управление диалогами"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://chatgpt.com/c/*", "https://chatgpt.com/g/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
