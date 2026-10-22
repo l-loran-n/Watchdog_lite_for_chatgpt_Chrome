@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Watchdog Lite — ChatGPT",
-  "version": "6.3.7",
-  "description": "Локальное сопровождение выбранных диалогов ChatGPT с ограничениями безопасности.",
+  "version": "6.4.0",
+  "description": "Продолжает задачи в ChatGPT до 15 минут. Ждёт ответа пользователя на PAUSE и автоматически продолжает по WORKING.",
   "minimum_chrome_version": "120",
   "permissions": ["storage", "alarms", "scripting"],
   "host_permissions": ["https://chatgpt.com/*"],
@@ -11,7 +11,7 @@
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Watchdog Lite — управление диалогами"
+    "default_title": "Watchdog Lite — продолжение задач в ChatGPT"
   },
   "content_scripts": [
     {

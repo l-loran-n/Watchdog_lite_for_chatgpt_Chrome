@@ -1,13 +1,17 @@
 "use strict";
 
-// Only the service worker may persist or change Watchdog jobs.
+// Состояние диалогов меняется только здесь: так вкладки не мешают друг другу.
 const ALARM_NAME = "watchdog-lite";
+const DEADLINE_ALARM = "watchdog-deadline";
 const CHATGPT_ORIGIN = "https://chatgpt.com";
 const MAX_JOBS = 20;
 const MAX_TURNS = 100;
+const RUN_TIME = 15 * 60_000;
+const watching = (job) => job?.mode === "RUNNING" ||
+  (job?.mode === "PAUSED" && job.result === "PAUSE");
 const ALLOWED_PATCH_FIELDS = {
-  mode: (value) => ["ERROR", "PAUSED"].includes(value),
-  phase: (value) => ["BOOT", "SENDING", "WAIT", "DONE"].includes(value),
+  mode: (value) => ["RUNNING", "ERROR", "PAUSED", "DONE"].includes(value),
+  phase: (value) => ["BOOT", "SENDING", "WAIT", "PAUSE", "DONE"].includes(value),
   kind: (value) => ["", "BOOT", "CONTINUE", "REPAIR", "RESCUE"].includes(value),
   cmd: (value) =>
     typeof value === "string" &&
@@ -21,7 +25,8 @@ const ALLOWED_PATCH_FIELDS = {
   anchor: (value) => shortText(value, 128),
   ignoreError: (value) => typeof value === "boolean",
   detail: (value) => shortText(value, 500),
-  result: (value) => ["", "PASS", "FAIL"].includes(value),
+  result: (value) => ["", "PASS", "FAIL", "PAUSE"].includes(value),
+  pauseUserCount: (value) => Number.isSafeInteger(value) && value >= 0 && value <= 100_000,
   error: (value) => shortText(value, 500),
   attention: (value) => shortText(value, 500),
 };
@@ -85,11 +90,11 @@ function isContent(sender) {
 }
 function requirePopup(sender) {
   if (!isPopup(sender))
-    throw new Error("This command is available only from the extension popup.");
+    throw new Error("Эта команда доступна только из окна расширения.");
 }
 function requireContent(sender) {
   if (!isContent(sender))
-    throw new Error("This command is available only from a ChatGPT tab.");
+    throw new Error("Эта команда доступна только во вкладке ChatGPT.");
 }
 
 let queue = Promise.resolve();
@@ -105,43 +110,64 @@ async function loadJobs() {
 }
 const saveJobs = (jobs) => chrome.storage.local.set({ jobs });
 
+function expired(job) {
+  return !isTime(job.deadline) || Date.now() >= job.deadline;
+}
+function timeout(job) {
+  Object.assign(job, {
+    mode: "ERROR", phase: "DONE", result: "TIMEOUT", endedAt: Date.now(),
+    error: isTime(job.deadline)
+      ? "Лимит 15 минут исчерпан. Проверьте результат; новый запуск возможен вручную."
+      : "После обновления расширения запустите этот чат заново.",
+    detail: "", attention: "",
+  });
+}
+async function notifyTimeout(job) {
+  await chrome.tabs.sendMessage(job.tabId, {
+    type: "TIMEOUT", id: job.id, runId: job.runId,
+  }).catch(() => {});
+}
+
 async function armAlarm() {
   const jobs = await loadJobs();
-  const hasRunningJobs = Object.values(jobs).some(
-    (job) => job?.mode === "RUNNING",
-  );
-  if (hasRunningJobs) {
+  const active = Object.values(jobs).filter(watching);
+  if (active.length) {
     if (!(await chrome.alarms.get(ALARM_NAME))) {
       await chrome.alarms.create(ALARM_NAME, { periodInMinutes: 0.5 });
     }
+    const when = Math.min(...active.map(job => job.deadline || Date.now()));
+    if ((await chrome.alarms.get(DEADLINE_ALARM))?.scheduledTime !== when) {
+      await chrome.alarms.create(DEADLINE_ALARM, { when });
+    }
   } else {
     await chrome.alarms.clear(ALARM_NAME);
+    await chrome.alarms.clear(DEADLINE_ALARM);
   }
 }
 chrome.runtime.onInstalled.addListener(() => {
-  armAlarm().catch(console.error);
+  sweep().catch(console.error);
 });
 chrome.runtime.onStartup.addListener(() => {
-  armAlarm().catch(console.error);
+  sweep().catch(console.error);
 });
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "local" && changes.jobs) armAlarm().catch(console.error);
 });
-armAlarm().catch(console.error);
+sweep().catch(console.error);
 
 function validatePatch(patch) {
   if (!patch || typeof patch !== "object" || Array.isArray(patch)) {
-    throw new Error("Invalid job patch.");
+    throw new Error("Не удалось обновить состояние диалога.");
   }
   const entries = Object.entries(patch);
   if (entries.length === 0 || entries.length > 16)
-    throw new Error("Invalid patch size.");
+    throw new Error("Некорректный размер обновления.");
   for (const [field, value] of entries) {
     if (
       !Object.hasOwn(ALLOWED_PATCH_FIELDS, field) ||
       !ALLOWED_PATCH_FIELDS[field](value)
     ) {
-      throw new Error("Rejected unsafe job patch.");
+      throw new Error("Недопустимое изменение состояния диалога.");
     }
   }
   return patch;
@@ -149,7 +175,7 @@ function validatePatch(patch) {
 
 async function handle(message, sender) {
   if (!message || typeof message.type !== "string")
-    throw new Error("Invalid message.");
+    throw new Error("Неизвестная команда расширения.");
   if (message.type === "IDENTIFY") {
     requireContent(sender);
     return { tabId: sender.tab.id };
@@ -161,7 +187,7 @@ async function handle(message, sender) {
     return {
       jobs: Object.fromEntries(
         Object.entries(jobs).filter(
-          ([, job]) => job?.mode === "RUNNING" && job.tabId === sender.tab.id,
+          ([, job]) => job?.tabId === sender.tab.id,
         ),
       ),
     };
@@ -172,26 +198,32 @@ async function handle(message, sender) {
 
     if (message.type === "ADD") {
       requirePopup(sender);
-      if (!Number.isInteger(message.tabId)) throw new Error("Invalid tab.");
+      if (!Number.isInteger(message.tabId)) throw new Error("Вкладка не найдена.");
       const tab = await chrome.tabs.get(message.tabId).catch(() => null);
       const selected = target(tab?.url);
       if (!tab || !selected || selected.url !== normalizedUrl(message.url)) {
-        throw new Error("Откройте существующий диалог ChatGPT и повторите.");
+        throw new Error("Откройте нужный чат ChatGPT и попробуйте снова.");
       }
       if (
-        Object.values(jobs).filter((job) => job?.mode === "RUNNING").length >=
+        Object.values(jobs).filter(watching).length >=
         MAX_JOBS
       ) {
-        throw new Error("Достигнут предел в 20 отслеживаемых диалогов.");
+        throw new Error("Уже запущено 20 чатов. Сначала остановите один из них.");
       }
       if (
         Object.values(jobs).some(
-          (job) => job?.tabId === tab.id || job?.url === selected.url,
+          (job) => watching(job) &&
+            (job.tabId === tab.id || job.url === selected.url),
         )
       ) {
-        throw new Error("Диалог уже в списке. Сначала удалите прежнюю запись.");
+        throw new Error("Этот чат уже запущен.");
+      }
+      // При повторном запуске заменяем старую запись, а не копим карточки.
+      for (const [id, job] of Object.entries(jobs)) {
+        if (job?.tabId === tab.id || job?.url === selected.url) delete jobs[id];
       }
       const id = crypto.randomUUID();
+      const startedAt = Date.now();
       jobs[id] = {
         id,
         runId: crypto.randomUUID(),
@@ -203,14 +235,18 @@ async function handle(message, sender) {
         cmd: "",
         kind: "",
         turn: 0,
-        since: Date.now(),
-        seen: Date.now(),
+        startedAt,
+        deadline: startedAt + RUN_TIME,
+        endedAt: 0,
+        pauseUserCount: 0,
+        since: startedAt,
+        seen: startedAt,
         recoveries: 0,
         repairs: 0,
         anchor: "",
         rescues: 0,
         ignoreError: false,
-        detail: "Запуск: проверка страницы",
+        detail: "Проверяю страницу",
         result: "",
         error: "",
         attention: "",
@@ -228,7 +264,7 @@ async function handle(message, sender) {
 
     if (message.type === "REMOVE") {
       requirePopup(sender);
-      if (typeof message.id !== "string") throw new Error("Invalid job ID.");
+      if (typeof message.id !== "string") throw new Error("Диалог не найден.");
       delete jobs[message.id];
       await saveJobs(jobs);
       return { ok: true };
@@ -239,15 +275,24 @@ async function handle(message, sender) {
     if (
       !job ||
       job.runId !== message.runId ||
-      job.mode !== "RUNNING" ||
+      !watching(job) ||
       job.tabId !== sender.tab.id
     )
       return { ok: false };
 
     const tab = await chrome.tabs.get(job.tabId).catch(() => null);
+    // Срок не меняется ни при паузе, ни при перезагрузке, ни при смене команды.
+    if (expired(job)) {
+      timeout(job);
+      await saveJobs(jobs);
+      await notifyTimeout(job);
+      return { ok: false, expired: true };
+    }
+    if (message.type === "EXPIRE") return { ok: false };
     if (message.type === "CHECK") {
       return {
         ok:
+          job.mode === "RUNNING" &&
           job.cmd === message.cmd &&
           job.phase === "SENDING" &&
           normalizedUrl(tab?.url) === job.url,
@@ -278,6 +323,7 @@ async function handle(message, sender) {
         return { ok: false };
       const patch = validatePatch(message.patch);
       Object.assign(job, patch);
+      if (!watching(job)) job.endedAt = Date.now();
     } else {
       return { ok: false };
     }
@@ -294,14 +340,20 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
   return true;
 });
 
-chrome.alarms.onAlarm.addListener(({ name }) => {
-  if (name !== ALARM_NAME) return;
-  serialize(async () => {
+function sweep() {
+  return serialize(async () => {
     const jobs = await loadJobs();
     let changed = false;
+    const timedOut = [];
 
     for (const job of Object.values(jobs)) {
-      if (job?.mode !== "RUNNING") continue;
+      if (!watching(job)) continue;
+      if (expired(job)) {
+        timeout(job);
+        timedOut.push(job);
+        changed = true;
+        continue;
+      }
       const tab = await chrome.tabs.get(job.tabId).catch(() => null);
       const current = normalizedUrl(tab?.url);
 
@@ -311,14 +363,15 @@ chrome.alarms.onAlarm.addListener(({ name }) => {
         current.startsWith(job.url + "/c/") &&
         target(current)
       ) {
-        // Content script must verify the GPT history fingerprint before UPGRADE.
+        // Перед сменой адреса скрипт во вкладке должен сверить историю GPT.
         continue;
       }
       if (current !== job.url) {
         Object.assign(job, {
           mode: "ERROR",
+          endedAt: Date.now(),
           error:
-            "Вкладка закрыта или переключена. Автоматическое открытие отключено.",
+            "Вкладка закрыта или в ней открыт другой чат. Откройте нужный чат и запустите Watchdog снова.",
         });
         changed = true;
         continue;
@@ -343,6 +396,7 @@ chrome.alarms.onAlarm.addListener(({ name }) => {
         if (!injected || job.recoveries >= 3) {
           Object.assign(job, {
             mode: "ERROR",
+            endedAt: Date.now(),
             error:
               "Скрипт недоступен. Перезагрузите страницу вручную и добавьте диалог снова.",
           });
@@ -354,5 +408,10 @@ chrome.alarms.onAlarm.addListener(({ name }) => {
     }
 
     if (changed) await saveJobs(jobs);
-  }).catch(console.error);
+    for (const job of timedOut) await notifyTimeout(job);
+    await armAlarm();
+  });
+}
+chrome.alarms.onAlarm.addListener(({ name }) => {
+  if (name === ALARM_NAME || name === DEADLINE_ALARM) sweep().catch(console.error);
 });

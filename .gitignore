@@ -1,4 +1,4 @@
-# Developer files and build output
+# Локальные файлы, архивы и ключи
 node_modules/
 dist/
 build/
@@ -27,7 +27,7 @@ coverage/
 .DS_Store
 Thumbs.db
 
-# Browser profiles and user-specific state
+# Профили браузера и личные данные
 User Data/
 Chrome Profile/
 Default/
