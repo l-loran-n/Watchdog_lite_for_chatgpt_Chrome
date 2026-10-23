@@ -84,10 +84,6 @@
   )].find(visible);
   const generating = () => !!stopButton() ||
     [...document.querySelectorAll('[data-is-streaming="true"]')].some(visible);
-  function stopGeneration() {
-    const button = stopButton();
-    if (button && !button.disabled) button.click();
-  }
   const sendButton = (editor) => {
     const selector =
       'button[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label="Send message"], button[aria-label="Отправить"]';
@@ -98,48 +94,74 @@
     );
   };
 
-  // Считываем только основной контент диалога; меню, подсказки и черновик исключены.
+  // Структура сообщений ChatGPT меняется независимо от интерфейса ввода.
+  // Определяем автора по пузырю/контенту внутри одного хода, а текст берём
+  // из тела сообщения, не из панели действий ("ChatGPT сказал" и т. п.).
+  const TURN_SELECTOR =
+    '[data-testid^="conversation-turn-"], article[data-turn-id], [data-turn-id]';
+  const USER_SELECTOR =
+    '[data-testid="user-message"], [data-user-message-bubble], .user-message-bubble-color';
+  const ASSISTANT_SELECTOR =
+    '[data-testid="assistant-message"], [data-content-search-unit-key], [data-markdown-text-style], .markdown, .prose';
+  const ROLE_SELECTOR =
+    '[data-message-author-role="user"], [data-message-author-role="assistant"]';
+
+  function turnRole(el) {
+    const explicit = el.getAttribute?.("data-message-author-role") ||
+      el.querySelector?.(ROLE_SELECTOR)?.getAttribute("data-message-author-role");
+    if (explicit === "user" || explicit === "assistant") return explicit;
+    if (el.matches?.(USER_SELECTOR) || el.querySelector?.(USER_SELECTOR))
+      return "user";
+    if (el.matches?.(ASSISTANT_SELECTOR) || el.querySelector?.(ASSISTANT_SELECTOR))
+      return "assistant";
+    return "";
+  }
+
+  function messageText(el, role) {
+    const groups = role === "user"
+      ? [USER_SELECTOR]
+      : [
+          '[data-markdown-text-style], .markdown',
+          '[data-testid="assistant-message"]',
+          '[data-content-search-unit-key]',
+          '.prose',
+        ];
+    for (const selector of groups) {
+      const matched = [
+        ...(el.matches?.(selector) ? [el] : []),
+        ...(el.querySelectorAll?.(selector) || []),
+      ];
+      // Один и тот же текст может находиться и в .markdown, и в её потомке.
+      const roots = matched.filter(
+        (n, i) => !matched.some((other, j) => i !== j && other.contains?.(n)),
+      );
+      const parts = roots.map(read).filter(Boolean);
+      if (parts.length) return parts.join("\n");
+    }
+    return read(el);
+  }
+
+  // Считываем только основной диалог, исключая меню, подсказки и черновик.
   function turns() {
     const main = $("main") || $('[role="main"]');
     if (!main) return [];
-    const selectors =
-      '[data-testid^="conversation-turn-"], article[data-turn-id], [data-turn-id]';
-    const containers = [...main.querySelectorAll(selectors)].filter(
-      (n) => !n.parentElement?.closest(selectors),
+    const containers = [...main.querySelectorAll(TURN_SELECTOR)].filter(
+      (n) => !n.parentElement?.closest(TURN_SELECTOR),
     );
     const result = [];
     for (const el of containers) {
-      const tagged = el.matches("[data-message-author-role]")
-        ? el
-        : el.querySelector(
-            '[data-message-author-role="user"], [data-message-author-role="assistant"]',
-          );
-      const user = el.querySelector(
-        '[data-testid="user-message"], .user-message-bubble-color',
-      );
-      const assistant = el.querySelector(
-        '[data-testid="assistant-message"], .markdown, .prose',
-      );
-      const role =
-        tagged?.getAttribute("data-message-author-role") ||
-        (user ? "user" : assistant ? "assistant" : "");
-      if (role !== "user" && role !== "assistant") continue;
-      const body = tagged || (role === "user" ? user : assistant) || el;
-      result.push({ role, text: read(body) || read(el), el });
+      const role = turnRole(el);
+      if (role) result.push({ role, text: messageText(el, role), el });
     }
-    // Не возвращаемся раньше времени: часть версий интерфейса смешивает форматы.
+    // Смешанная/новая разметка: отдельные сообщения без conversation-turn.
     const fallback =
-      '[data-message-author-role="user"], [data-message-author-role="assistant"], [data-testid="user-message"], [data-testid="assistant-message"], .user-message-bubble-color, .markdown';
+      ROLE_SELECTOR + ', ' + USER_SELECTOR + ', ' + ASSISTANT_SELECTOR;
     for (const el of main.querySelectorAll(fallback)) {
-      if (containers.some((root) => root.contains(el))) continue;
+      if (containers.some((root) => root.contains?.(el))) continue;
       if (el.parentElement?.closest(fallback)) continue;
-      if (el.closest('form, [contenteditable="true"], nav, aside')) continue;
-      const role =
-        el.getAttribute("data-message-author-role") ||
-        (el.matches('[data-testid="user-message"], .user-message-bubble-color')
-          ? "user"
-          : "assistant");
-      result.push({ role, text: read(el), el });
+      if (el.closest?.('form, [contenteditable="true"], nav, aside')) continue;
+      const role = turnRole(el);
+      if (role) result.push({ role, text: messageText(el, role), el });
     }
     result.sort((a, b) =>
       a.el === b.el
@@ -255,22 +277,19 @@
       RESCUE:
         "Предыдущий ответ завершился технической ошибкой. Проверь фактическое состояние и продолжай с места остановки без повторения выполненных действий.",
     }[kind];
-    const seconds = Math.max(0, Math.floor((j.deadline - Date.now()) / 1000));
     return `[WATCHDOG LITE]
 MESSAGE_KIND=${kind}
 COMMAND_ID=${cmd}
-RUN_DEADLINE=${new Date(j.deadline).toISOString()}
-SECONDS_LEFT=${seconds}
 
 ${purpose}
 
-На весь запуск отведено не более 15 минут, включая ожидание пользователя. Осталось ${seconds} сек. Учитывай крайний срок RUN_DEADLINE (UTC). Не запускай работу, которую не успеешь закончить; оставь последнюю минуту на проверку и итог. Лимит не начинается заново после сообщения или паузы.
+У Watchdog нет ограничения времени на запуск. Продолжай работу до проверенного результата, запроса к пользователю или объективной невозможности завершения. Не объявляй задачу готовой только из-за длительности работы.
 
 Состояния:
 WORKING — можешь продолжать незавершённую работу без ответа пользователя.
 PAUSE — нужен ответ, выбор или разрешение пользователя. Коротко задай конкретный вопрос и жди; не продолжай работу сам.
 PASS — задача выполнена и результат проверен настолько, насколько доступно.
-FAIL — завершить задачу невозможно или времени недостаточно. Укажи причину и что осталось.
+FAIL — завершить задачу невозможно. Укажи причину и что осталось.
 
 В конце каждого ответа дай краткий отчёт, без общих обещаний:
 Сделано: 1–3 конкретных факта; укажи количество изменённых или созданных объектов, если оно известно.
@@ -288,18 +307,6 @@ FAIL — завершить задачу невозможно или време�
     stableSince = 0;
   chrome.runtime.onMessage.addListener((m, sender, reply) => {
     if (m?.type === "PING") reply({ ok: true });
-    if (m?.type === "TIMEOUT" && sender.id === chrome.runtime.id) {
-      all().then(jobs => {
-        const current = jobs[m.id];
-        // Не останавливаем другой чат или уже начатый вручную новый запуск.
-        if (current?.runId === m.runId && current.result === "TIMEOUT" &&
-            current.url === url() && Date.now() >= current.deadline) {
-          stopGeneration();
-        }
-        reply({ ok: true });
-      }).catch(() => reply({ ok: false }));
-      return true;
-    }
   });
   rpc({ type: "IDENTIFY" })
     .then((r) => {
@@ -327,7 +334,6 @@ FAIL — завершить задачу невозможно или време�
     patch(j, { mode: "ERROR", error: reason, detail: "", attention: "" });
   const detail = (j, text) =>
     j.detail === text ? Promise.resolve(j) : patch(j, { detail: text });
-  const expire = (j) => rpc({ type: "EXPIRE", id: j.id, runId: j.runId });
   const pause = (j, userCount, text) => patch(j, {
     mode: "PAUSED", phase: "PAUSE", result: "PAUSE",
     pauseUserCount: userCount, detail: text, error: "", attention: "",
@@ -390,8 +396,6 @@ FAIL — завершить задачу невозможно или време�
     }
   }
   async function send(j, kind) {
-    if (!Number.isSafeInteger(j.deadline) || Date.now() >= j.deadline) return expire(j);
-    // После лимита нужен явный повторный запуск из окна расширения.
     if (j.turn >= LIMIT.maxTurns)
       return error(
         j,
@@ -521,7 +525,6 @@ FAIL — завершить задачу невозможно или време�
       if (j.tabOnly && j.anchor && fingerprint() !== j.anchor)
         return await error(j, "Вкладка GPT показывает другую переписку");
       const now = Date.now();
-      if (!Number.isSafeInteger(j.deadline) || now >= j.deadline) return await expire(j);
       if (now - j.seen > 20_000) j = (await patch(j, { seen: now })) || j;
       if (j.phase === "PAUSE") return await observePause(j, replyFor(j.cmd));
       const issue = chatError();

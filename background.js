@@ -2,11 +2,10 @@
 
 // Состояние диалогов меняется только здесь: так вкладки не мешают друг другу.
 const ALARM_NAME = "watchdog-lite";
-const DEADLINE_ALARM = "watchdog-deadline";
+const LEGACY_DEADLINE_ALARM = "watchdog-deadline";
 const CHATGPT_ORIGIN = "https://chatgpt.com";
 const MAX_JOBS = 20;
 const MAX_TURNS = 100;
-const RUN_TIME = 15 * 60_000;
 const watching = (job) => job?.mode === "RUNNING" ||
   (job?.mode === "PAUSED" && job.result === "PAUSE");
 const ALLOWED_PATCH_FIELDS = {
@@ -110,38 +109,17 @@ async function loadJobs() {
 }
 const saveJobs = (jobs) => chrome.storage.local.set({ jobs });
 
-function expired(job) {
-  return !isTime(job.deadline) || Date.now() >= job.deadline;
-}
-function timeout(job) {
-  Object.assign(job, {
-    mode: "ERROR", phase: "DONE", result: "TIMEOUT", endedAt: Date.now(),
-    error: isTime(job.deadline)
-      ? "Лимит 15 минут исчерпан. Проверьте результат; новый запуск возможен вручную."
-      : "После обновления расширения запустите этот чат заново.",
-    detail: "", attention: "",
-  });
-}
-async function notifyTimeout(job) {
-  await chrome.tabs.sendMessage(job.tabId, {
-    type: "TIMEOUT", id: job.id, runId: job.runId,
-  }).catch(() => {});
-}
-
 async function armAlarm() {
+  // Убираем таймер из прежней версии при обновлении, не завершая задачи.
+  await chrome.alarms.clear(LEGACY_DEADLINE_ALARM);
   const jobs = await loadJobs();
   const active = Object.values(jobs).filter(watching);
   if (active.length) {
     if (!(await chrome.alarms.get(ALARM_NAME))) {
       await chrome.alarms.create(ALARM_NAME, { periodInMinutes: 0.5 });
     }
-    const when = Math.min(...active.map(job => job.deadline || Date.now()));
-    if ((await chrome.alarms.get(DEADLINE_ALARM))?.scheduledTime !== when) {
-      await chrome.alarms.create(DEADLINE_ALARM, { when });
-    }
   } else {
     await chrome.alarms.clear(ALARM_NAME);
-    await chrome.alarms.clear(DEADLINE_ALARM);
   }
 }
 chrome.runtime.onInstalled.addListener(() => {
@@ -236,7 +214,6 @@ async function handle(message, sender) {
         kind: "",
         turn: 0,
         startedAt,
-        deadline: startedAt + RUN_TIME,
         endedAt: 0,
         pauseUserCount: 0,
         since: startedAt,
@@ -281,14 +258,6 @@ async function handle(message, sender) {
       return { ok: false };
 
     const tab = await chrome.tabs.get(job.tabId).catch(() => null);
-    // Срок не меняется ни при паузе, ни при перезагрузке, ни при смене команды.
-    if (expired(job)) {
-      timeout(job);
-      await saveJobs(jobs);
-      await notifyTimeout(job);
-      return { ok: false, expired: true };
-    }
-    if (message.type === "EXPIRE") return { ok: false };
     if (message.type === "CHECK") {
       return {
         ok:
@@ -344,16 +313,9 @@ function sweep() {
   return serialize(async () => {
     const jobs = await loadJobs();
     let changed = false;
-    const timedOut = [];
 
     for (const job of Object.values(jobs)) {
       if (!watching(job)) continue;
-      if (expired(job)) {
-        timeout(job);
-        timedOut.push(job);
-        changed = true;
-        continue;
-      }
       const tab = await chrome.tabs.get(job.tabId).catch(() => null);
       const current = normalizedUrl(tab?.url);
 
@@ -408,10 +370,9 @@ function sweep() {
     }
 
     if (changed) await saveJobs(jobs);
-    for (const job of timedOut) await notifyTimeout(job);
     await armAlarm();
   });
 }
 chrome.alarms.onAlarm.addListener(({ name }) => {
-  if (name === ALARM_NAME || name === DEADLINE_ALARM) sweep().catch(console.error);
+  if (name === ALARM_NAME) sweep().catch(console.error);
 });

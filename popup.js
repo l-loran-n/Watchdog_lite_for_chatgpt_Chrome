@@ -23,7 +23,7 @@ async function request(message) {
 }
 
 function stateLabel(job) {
-  if (job.result === "TIMEOUT") return "Лимит 15 минут";
+  if (job.result === "TIMEOUT") return "Ранее остановлено по таймеру";
   if (job.mode === "ERROR") return "Остановлено";
   if (job.result === "PAUSE") return "Пауза · нужен ваш ответ";
   if (job.mode === "DONE" || job.mode === "PAUSED") {
@@ -41,10 +41,13 @@ function stateLabel(job) {
 const watching = job => job.mode === "RUNNING" ||
   (job.mode === "PAUSED" && job.result === "PAUSE");
 function elapsedLabel(job) {
-  if (!job.startedAt || !job.deadline) return "";
-  const end = Math.min(job.endedAt || Date.now(), job.deadline);
-  const seconds = Math.max(0, Math.floor((end - job.startedAt) / 1000));
-  return Math.floor(seconds / 60) + ":" + String(seconds % 60).padStart(2, "0") + " из 15:00";
+  if (!job.startedAt) return "";
+  const seconds = Math.max(0, Math.floor(((job.endedAt || Date.now()) - job.startedAt) / 1000));
+  const minutes = Math.floor(seconds / 60);
+  const suffix = ":" + String(seconds % 60).padStart(2, "0");
+  return minutes >= 60
+    ? Math.floor(minutes / 60) + ":" + String(minutes % 60).padStart(2, "0") + suffix
+    : minutes + suffix;
 }
 
 function textElement(tag, className, value) {

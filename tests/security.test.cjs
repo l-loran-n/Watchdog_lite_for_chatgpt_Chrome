@@ -367,18 +367,18 @@ const update = (worker, job, patch) => worker.message({
   expectedUrl: job.url, expectedPhase: job.phase, patch,
 }, worker.content(job.tabId));
 
-test("срок запуска равен 15 минутам и не меняется из вкладки", async () => {
+test("новый запуск не имеет срока, а поля безопасности нельзя менять из вкладки", async () => {
   const worker = createWorker();
   const job = (await worker.add(10)).job;
-  assert.equal(job.deadline - job.startedAt, 15 * 60_000);
-  assert.match((await update(worker, job, { deadline: job.deadline + 60_000 })).error, /Недопустимое/);
+  assert.equal(Object.hasOwn(job, "deadline"), false);
+  assert.match((await update(worker, job, { deadline: Date.now() + 60_000 })).error, /Недопустимое/);
   assert.match((await update(worker, job, { startedAt: job.startedAt + 60_000 })).error, /Недопустимое/);
   assert.match((await update(worker, job, { result: "TIMEOUT" })).error, /Недопустимое/);
   await worker.alarm();
-  assert.equal(worker.alarms.get("watchdog-deadline").scheduledTime, job.deadline);
+  assert.equal(worker.alarms.has("watchdog-deadline"), false);
 });
 
-test("PAUSE остаётся под наблюдением и WORKING не сбрасывает срок", async () => {
+test("PAUSE остаётся под наблюдением и WORKING не создаёт дедлайн", async () => {
   const worker = createWorker();
   const job = (await worker.add(10)).job;
   const paused = (await update(worker, job, {
@@ -386,61 +386,57 @@ test("PAUSE остаётся под наблюдением и WORKING не сб�
   })).job;
   assert.ok((await worker.message({ type: "GET" }, worker.content(10))).jobs[job.id]);
   assert.match((await worker.add(10)).error, /уже запущен/);
-  worker.advance(5 * 60_000);
+  worker.advance(3 * 60 * 60_000);
   const resumed = (await update(worker, paused, {
     mode: "RUNNING", phase: "SENDING", result: "", cmd: "cmd-resumed-12345678",
   })).job;
-  assert.equal(resumed.deadline, job.deadline);
+  assert.equal(Object.hasOwn(resumed, "deadline"), false);
   assert.equal(resumed.startedAt, job.startedAt);
   assert.equal(resumed.endedAt, 0);
 });
 
-test("ровно на 15 минутах последняя проверка отправки отказывает", async () => {
+test("разрешение отправки сохраняется спустя несколько часов", async () => {
   const worker = createWorker();
   const job = (await worker.add(10)).job;
-  const cmd = "cmd-timeout-12345678";
+  const cmd = "cmd-long-run-12345678";
   await update(worker, job, { phase: "SENDING", cmd });
-  worker.advance(15 * 60_000 - 1);
+  worker.advance(3 * 60 * 60_000);
   const check = { type: "CHECK", id: job.id, runId: job.runId, cmd };
   assert.equal((await worker.message(check, worker.content(10))).ok, true);
-  worker.advance(1);
-  const expired = await worker.message(check, worker.content(10));
-  assert.equal(expired.ok, false);
-  assert.equal(expired.expired, true);
-  assert.equal(worker.jobs()[0].result, "TIMEOUT");
-  assert.ok(worker.notifications.some(message => message.type === "TIMEOUT" && message.runId === job.runId));
+  assert.equal(worker.jobs()[0].mode, "RUNNING");
 });
 
-test("пауза тоже заканчивается по общему сроку, старый запуск не оживает", async () => {
+test("многочасовая пауза не переводит задачу в ошибку", async () => {
   const worker = createWorker();
   const job = (await worker.add(10)).job;
   const paused = (await update(worker, job, {
     mode: "PAUSED", phase: "PAUSE", result: "PAUSE",
   })).job;
-  worker.advance(15 * 60_000);
-  await worker.alarm("watchdog-deadline");
-  assert.equal(worker.jobs()[0].result, "TIMEOUT");
-  assert.equal(worker.jobs()[0].mode, "ERROR");
+  worker.advance(3 * 60 * 60_000);
+  await worker.alarm();
+  assert.equal(worker.jobs()[0].mode, "PAUSED");
+  assert.equal(worker.jobs()[0].result, "PAUSE");
   assert.equal((await update(worker, paused, {
     mode: "RUNNING", phase: "WAIT", result: "",
-  })).ok, false);
-  assert.equal(worker.alarms.has("watchdog-deadline"), false);
+  })).ok, true);
 });
 
-test("после сна компьютера отправка блокируется до следующего фонового опроса", async () => {
+test("после сна компьютера новый срок не требуется", async () => {
   const worker = createWorker();
   const job = (await worker.add(10)).job;
   worker.advance(30 * 60_000);
   const response = await update(worker, job, { phase: "SENDING", cmd: "cmd-late-12345678" });
-  assert.equal(response.expired, true);
-  assert.equal(worker.jobs()[0].result, "TIMEOUT");
+  assert.equal(response.ok, true);
+  assert.equal(worker.jobs()[0].mode, "RUNNING");
 });
 
-test("старый запуск без срока после обновления требует ручного перезапуска", async () => {
+test("старые дедлайны игнорируются, прежний таймер удаляется", async () => {
   const worker = createWorker();
   await worker.add(10);
-  delete worker.jobs()[0].deadline;
+  worker.jobs()[0].deadline = 1;
+  worker.alarms.set("watchdog-deadline", { scheduledTime: 1 });
+  worker.advance(3 * 60 * 60_000);
   await worker.alarm();
-  assert.equal(worker.jobs()[0].mode, "ERROR");
-  assert.match(worker.jobs()[0].error, /После обновления/);
+  assert.equal(worker.jobs()[0].mode, "RUNNING");
+  assert.equal(worker.alarms.has("watchdog-deadline"), false);
 });

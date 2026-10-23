@@ -20,7 +20,7 @@ async function flow(state = "PAUSE") {
   let saved = {
     id: "job", runId: "run", tabId: 10, url: "https://chatgpt.com/c/flow",
     mode: "RUNNING", phase: "WAIT", cmd, kind: "BOOT", turn: 1,
-    startedAt: now, deadline: now + 15 * 60_000, seen: now, since: now,
+    startedAt: now, seen: now, since: now,
     endedAt: 0, pauseUserCount: 0, result: "", repairs: 0, rescues: 0,
     recoveries: 0, anchor: "", ignoreError: false,
   };
@@ -67,11 +67,9 @@ async function flow(state = "PAUSE") {
       async sendMessage(message) {
         if (message.type === "IDENTIFY") return { tabId: 10 };
         if (message.type === "GET") return { jobs: { job: structuredClone(saved) } };
-        if (message.type === "EXPIRE") {
-          saved.mode = "ERROR"; saved.result = "TIMEOUT";
-          return { ok: false, expired: true };
-        }
-        if (message.type === "CHECK") return { ok: now < saved.deadline };
+        if (message.type === "CHECK") return {
+          ok: saved.phase === "SENDING" && saved.cmd === message.cmd,
+        };
         if (message.type === "PATCH") {
           assert.equal(message.expectedPhase, saved.phase);
           Object.assign(saved, structuredClone(message.patch));
@@ -128,13 +126,13 @@ test("PAUSE прекращает сообщения и не снимается �
 
 test("после ответа пользователя новый WORKING автоматически продолжает запуск", async () => {
   const f = await flow();
-  const deadline = f.job.deadline;
+  const startedAt = f.job.startedAt;
   await f.settle();
   f.messages.push(["user", "Выбираю первый вариант"], ["assistant", line("WORKING")]);
   await f.settle();
   assert.equal(f.job.mode, "RUNNING");
   assert.equal(f.job.phase, "WAIT");
-  assert.equal(f.job.deadline, deadline);
+  assert.equal(f.job.startedAt, startedAt);
   assert.equal(f.sent.length, 1);
   assert.match(f.sent[0], /MESSAGE_KIND=CONTINUE/);
   assert.notEqual(f.job.cmd, cmd);
@@ -194,36 +192,29 @@ test("черновик и незаконченная генерация не д�
   assert.equal(f.sent.length, 1);
 });
 
-test("истёкший срок не позволяет возобновиться по WORKING", async () => {
+test("после длительной паузы WORKING автоматически продолжает запуск", async () => {
   const f = await flow();
   await f.settle();
   f.messages.push(["user", "Продолжай"], ["assistant", line("WORKING")]);
-  f.advance(15 * 60_000);
+  f.advance(3 * 60 * 60_000);
   await f.settle();
-  assert.equal(f.job.result, "TIMEOUT");
-  assert.equal(f.sent.length, 0);
+  assert.equal(f.job.mode, "RUNNING");
+  assert.equal(f.job.phase, "WAIT");
+  assert.equal(f.sent.length, 1);
 });
 
-test("сигнал таймаута останавливает генерацию только своего истёкшего запуска", async () => {
-  const f = await flow();
-  const old = f.job;
-  f.advance(15 * 60_000);
-  f.streaming(true);
-  f.replaceJob({ ...old, mode: "ERROR", result: "TIMEOUT" });
-  await f.notify({ type: "TIMEOUT", id: "job", runId: "run" });
-  assert.equal(f.stopClicks, 1);
-  f.streaming(true);
-  f.replaceJob({ ...old, runId: "new-run", deadline: old.deadline + 60_000 });
-  await f.notify({ type: "TIMEOUT", id: "job", runId: "run" });
-  assert.equal(f.stopClicks, 1);
+test("долгий ответ не завершается по времени", async () => {
+  const f = await flow("WORKING");
+  f.advance(3 * 60 * 60_000);
+  await f.settle();
+  assert.equal(f.job.mode, "RUNNING");
+  assert.equal(f.sent.length, 1);
 });
 
-test("промпт содержит остаток общего времени и требует фактические метрики", async () => {
+test("промпт не содержит дедлайна и требует фактические метрики", async () => {
   const f = await flow();
-  assert.match(f.prompt(), /SECONDS_LEFT=900/);
-  f.advance(5 * 60_000);
   const prompt = f.prompt();
-  assert.match(prompt, /SECONDS_LEFT=600/);
+  assert.doesNotMatch(prompt, /RUN_DEADLINE|SECONDS_LEFT|15 минут/);
   for (const text of ["PAUSE", "Сделано:", "Проверки:", "Осталось:", "Не придумывай числа"]) {
     assert.ok(prompt.includes(text));
   }

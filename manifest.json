@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Watchdog Lite — ChatGPT",
-  "version": "6.4.0",
-  "description": "Продолжает задачи в ChatGPT до 15 минут. Ждёт ответа пользователя на PAUSE и автоматически продолжает по WORKING.",
+  "version": "6.4.3",
+  "description": "Продолжает задачи в ChatGPT без ограничения времени. Ждёт пользователя на PAUSE и автоматически продолжает по WORKING.",
   "minimum_chrome_version": "120",
   "permissions": ["storage", "alarms", "scripting"],
   "host_permissions": ["https://chatgpt.com/*"],
